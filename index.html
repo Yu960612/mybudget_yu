@@ -1,0 +1,283 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>mybudget_yu 記帳簿</title>
+  <meta name="description" content="簡易記帳 PWA（加到主畫面即可使用）" />
+  <!-- Basic styles -->
+  <style>
+    :root{--accent:#0ea5a4;--bg:#f7fafc;--card:#ffffff;--muted:#6b7280}
+    *{box-sizing:border-box}
+    body{font-family: -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial; margin:0; background:var(--bg); color:#111}
+    header{background:var(--accent); color:white;padding:14px 16px;display:flex;align-items:center;gap:12px}
+    header h1{font-size:18px;margin:0}
+    .controls{margin:12px;padding:0 16px;display:flex;gap:8px;align-items:center}
+    .month-nav{display:flex;gap:8px}
+    button{background:var(--card);border:1px solid #e5e7eb;padding:8px 10px;border-radius:8px}
+    .calendar{padding:16px}
+    .grid{display:grid;grid-template-columns:repeat(7,1fr);gap:8px}
+    .day{background:var(--card);min-height:84px;padding:8px;border-radius:8px;position:relative}
+    .day .date{font-size:12px;color:var(--muted)}
+    .add-btn{position:absolute;right:8px;bottom:8px;background:var(--accent);color:white;border-radius:50%;width:28px;height:28px;border:none}
+    .legend{display:flex;gap:8px;padding:0 16px;margin-bottom:6px}
+    .list{padding:12px}
+    .row{display:flex;gap:8px;padding:6px 0;border-bottom:1px dashed #eee}
+    .row .col{flex:1}
+    .modal{position:fixed;inset:0;background:rgba(0,0,0,0.4);display:flex;align-items:center;justify-content:center}
+    .card{background:var(--card);padding:16px;border-radius:12px;width:96%;max-width:480px}
+    label{display:block;margin-top:8px;font-size:13px;color:var(--muted)}
+    input[type=text],input[type=number],select{width:100%;padding:8px;margin-top:6px;border-radius:8px;border:1px solid #e5e7eb}
+    .row-actions{display:flex;gap:8px;justify-content:flex-end;margin-top:12px}
+    .export-btn{margin-left:auto}
+    footer{padding:12px;text-align:center;color:var(--muted);font-size:13px}
+    @media (max-width:420px){.day{min-height:72px}}
+  </style>
+  <!-- SheetJS for Excel export -->
+  <script src="https://cdn.jsdelivr.net/npm/xlsx/dist/xlsx.full.min.js"></script>
+</head>
+<body>
+  <header>
+    <div style="width:36px;height:36px;border-radius:8px;background:rgba(255,255,255,0.12);display:flex;align-items:center;justify-content:center;font-weight:600">¥</div>
+    <h1>mybudget_yu 記帳簿</h1>
+  </header>
+
+  <div class="controls">
+    <div class="month-nav">
+      <button id="prev">◀</button>
+      <div id="monthLabel" style="padding:8px 12px;border-radius:8px;background:white">2025 年 11 月</div>
+      <button id="next">▶</button>
+    </div>
+    <button id="openList" style="margin-left:8px">列表檢視</button>
+    <button id="exportBtn" class="export-btn">匯出本月 Excel</button>
+  </div>
+
+  <div class="calendar" id="calendarRoot">
+    <div class="legend">
+      <div style="font-size:13px;color:var(--muted)">週日 週一 週二 週三 週四 週五 週六</div>
+    </div>
+    <div class="grid" id="calendarGrid"></div>
+  </div>
+
+  <div class="list" id="listRoot" style="display:none">
+    <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+      <strong>本月紀錄</strong>
+      <button id="backToCal">回月曆</button>
+    </div>
+    <div id="recordList"></div>
+  </div>
+
+  <div id="modal" style="display:none" class="modal" aria-hidden="true">
+    <div class="card">
+      <h3 id="modalTitle">新增記帳</h3>
+      <label>日期</label>
+      <input type="date" id="inputDate" />
+
+      <label>類型</label>
+      <div style="display:flex;gap:8px;margin-top:6px">
+        <label><input type="radio" name="kind" value="expense" checked> 支出</label>
+        <label><input type="radio" name="kind" value="income"> 收入</label>
+      </div>
+
+      <label>項目（餐別）</label>
+      <select id="categorySelect">
+        <option>早餐</option>
+        <option>中餐</option>
+        <option>晚餐</option>
+        <option>消夜</option>
+        <option>其他</option>
+      </select>
+      <input type="text" id="otherInput" placeholder="若選其他，請在此輸入" style="display:none" />
+
+      <label>金額（新台幣）</label>
+      <input type="number" id="amountInput" min="0" />
+
+      <div class="row-actions">
+        <button id="deleteBtn" style="display:none;background:#fee2e2;border:1px solid #fecaca">刪除</button>
+        <button id="cancelBtn">取消</button>
+        <button id="saveBtn" style="background:var(--accent);color:white">儲存</button>
+      </div>
+    </div>
+  </div>
+
+  <footer>使用說明：在格子按 ＋ 新增。匯出會下載 XLSX 檔案，欄位為「日期 / 項目（餐別） / 支出 / 收入」。將此頁在 Safari 打開 → 分享 → 加到主畫面 即可像 App 一樣使用。</footer>
+
+  <script>
+    // --- 主要邏輯 ---
+    const KEY_PREFIX = 'mybudget_yu_';
+    let viewDate = new Date();
+    const calendarGrid = document.getElementById('calendarGrid');
+    const monthLabel = document.getElementById('monthLabel');
+    const modal = document.getElementById('modal');
+    const inputDate = document.getElementById('inputDate');
+    const categorySelect = document.getElementById('categorySelect');
+    const otherInput = document.getElementById('otherInput');
+    const amountInput = document.getElementById('amountInput');
+    const exportBtn = document.getElementById('exportBtn');
+    const recordList = document.getElementById('recordList');
+    const listRoot = document.getElementById('listRoot');
+    const calendarRoot = document.getElementById('calendarRoot');
+
+    let editing = null; // {id, monthKey}
+
+    function monthKey(date){
+      return `${KEY_PREFIX}${date.getFullYear()}_${date.getMonth()+1}`;
+    }
+
+    function loadRecords(key){
+      try{
+        const raw = localStorage.getItem(key);
+        return raw ? JSON.parse(raw) : [];
+      }catch(e){return []}
+    }
+    function saveRecords(key, arr){
+      localStorage.setItem(key, JSON.stringify(arr));
+    }
+
+    function renderCalendar(){
+      calendarGrid.innerHTML = '';
+      const y = viewDate.getFullYear();
+      const m = viewDate.getMonth();
+      monthLabel.textContent = `${y} 年 ${m+1} 月`;
+
+      const first = new Date(y,m,1);
+      const last = new Date(y,m+1,0);
+      const startDay = first.getDay();
+      const total = last.getDate();
+      // fill blanks for first week
+      for(let i=0;i<startDay;i++){
+        const blank = document.createElement('div'); blank.className='day'; blank.style.opacity=0; calendarGrid.appendChild(blank);
+      }
+      const key = monthKey(viewDate);
+      const records = loadRecords(key);
+
+      for(let d=1; d<=total; d++){
+        const dt = new Date(y,m,d);
+        const cell = document.createElement('div'); cell.className='day';
+        const dateSpan = document.createElement('div'); dateSpan.className='date'; dateSpan.textContent = `${d}`;
+        cell.appendChild(dateSpan);
+        // show up to 3 items
+        const dayRecords = records.filter(r=>r.date===formatDate(dt));
+        dayRecords.slice(0,3).forEach(r=>{
+          const p = document.createElement('div'); p.style.fontSize='13px'; p.textContent = `${r.category} ${r.kind==='expense' ? '-' : '+'}${r.amount}`;
+          cell.appendChild(p);
+        });
+        const btn = document.createElement('button'); btn.className='add-btn'; btn.textContent='+';
+        btn.addEventListener('click',()=>openModalForDate(dt));
+        cell.appendChild(btn);
+        calendarGrid.appendChild(cell);
+      }
+    }
+
+    function formatDate(d){
+      const y=d.getFullYear(); const m=d.getMonth()+1; const day=d.getDate();
+      return `${y}/${String(m).padStart(2,'0')}/${String(day).padStart(2,'0')}`;
+    }
+
+    function openModalForDate(d){
+      editing = null;
+      document.getElementById('modalTitle').textContent='新增記帳';
+      inputDate.value = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+      document.querySelector('input[name="kind"][value="expense"]').checked = true;
+      categorySelect.value='早餐'; otherInput.style.display='none'; otherInput.value=''; amountInput.value='';
+      document.getElementById('deleteBtn').style.display='none';
+      modal.style.display='flex';
+    }
+
+    function openList(){
+      calendarRoot.style.display='none'; listRoot.style.display='block';
+      renderList();
+    }
+    function backToCal(){ calendarRoot.style.display='block'; listRoot.style.display='none'; }
+
+    function renderList(){
+      recordList.innerHTML='';
+      const key = monthKey(viewDate); const records = loadRecords(key);
+      if(records.length===0){ recordList.textContent='本月無紀錄'; return }
+      records.sort((a,b)=>a.date.localeCompare(b.date));
+      records.forEach((r,i)=>{
+        const row = document.createElement('div'); row.className='row';
+        const c1 = document.createElement('div'); c1.className='col'; c1.textContent = r.date;
+        const c2 = document.createElement('div'); c2.className='col'; c2.textContent = r.category + (r.note? ' • '+r.note: '');
+        const c3 = document.createElement('div'); c3.className='col'; c3.textContent = r.kind==='expense' ? r.amount : '';
+        const c4 = document.createElement('div'); c4.className='col'; c4.textContent = r.kind==='income' ? r.amount : '';
+        const edit = document.createElement('button'); edit.textContent='編輯'; edit.addEventListener('click',()=>editRecord(i));
+        row.appendChild(c1); row.appendChild(c2); row.appendChild(c3); row.appendChild(c4); row.appendChild(edit);
+        recordList.appendChild(row);
+      });
+    }
+
+    function editRecord(index){
+      const key = monthKey(viewDate); const records = loadRecords(key);
+      const r = records[index]; if(!r) return;
+      editing = {index, key};
+      document.getElementById('modalTitle').textContent='編輯紀錄';
+      inputDate.value = r.date.replace(/\//g,'-');
+      document.querySelector(`input[name="kind"][value="${r.kind}"]`).checked = true;
+      if(['早餐','中餐','晚餐','消夜'].includes(r.category)){
+        categorySelect.value = r.category; otherInput.style.display='none'; otherInput.value='';
+      }else{ categorySelect.value='其他'; otherInput.style.display='block'; otherInput.value=r.category }
+      amountInput.value = r.amount; document.getElementById('deleteBtn').style.display='inline-block';
+      modal.style.display='flex';
+    }
+
+    // save from modal
+    document.getElementById('saveBtn').addEventListener('click',()=>{
+      const date = inputDate.value; if(!date){ alert('請選日期'); return }
+      const kind = document.querySelector('input[name="kind"]:checked').value;
+      let category = categorySelect.value; if(category==='其他'){ category = otherInput.value.trim() || '其他' }
+      const amount = Number(amountInput.value || 0);
+      if(amount<=0){ if(!confirm('金額為 0 或空白，是否繼續儲存？')) return }
+      const rec = {date: date.replace(/-/g,'/'), kind, category, amount};
+      const key = monthKey(new Date(date));
+      const arr = loadRecords(key);
+      if(editing && editing.key===key){ arr[editing.index]=rec; }
+      else if(editing && editing.key!==key){ // moved to other month
+        // remove from old
+        const oldArr = loadRecords(editing.key); oldArr.splice(editing.index,1); saveRecords(editing.key, oldArr);
+        arr.push(rec);
+      } else { arr.push(rec); }
+      saveRecords(key, arr);
+      modal.style.display='none'; editing=null; renderCalendar();
+    });
+
+    document.getElementById('cancelBtn').addEventListener('click',()=>{ modal.style.display='none'; editing=null });
+    document.getElementById('deleteBtn').addEventListener('click',()=>{
+      if(!editing) return; if(!confirm('確定刪除此筆紀錄？')) return;
+      const arr = loadRecords(editing.key); arr.splice(editing.index,1); saveRecords(editing.key, arr); modal.style.display='none'; editing=null; renderCalendar();
+    });
+
+    categorySelect.addEventListener('change', ()=>{ if(categorySelect.value==='其他'){ otherInput.style.display='block' } else { otherInput.style.display='none' } });
+
+    document.getElementById('prev').addEventListener('click', ()=>{ viewDate.setMonth(viewDate.getMonth()-1); renderCalendar(); });
+    document.getElementById('next').addEventListener('click', ()=>{ viewDate.setMonth(viewDate.getMonth()+1); renderCalendar(); });
+    document.getElementById('openList').addEventListener('click', openList);
+    document.getElementById('backToCal').addEventListener('click', backToCal);
+
+    // list cell editing
+    function openModalForDateString(str){ const parts=str.split('/'); openModalForDate(new Date(parts[0],Number(parts[1])-1,parts[2])); }
+
+    // export to XLSX using SheetJS
+    exportBtn.addEventListener('click', ()=>{
+      const key = monthKey(viewDate); const arr = loadRecords(key);
+      if(arr.length===0){ alert('本月無紀錄'); return }
+      // build sheet rows: Date | 項目（餐別） | 支出 | 收入
+      const data = [['日期','項目（餐別）','支出','收入']];
+      arr.forEach(r=>{
+        const row = [r.date, r.category, r.kind==='expense'? r.amount: '', r.kind==='income'? r.amount: ''];
+        data.push(row);
+      });
+      const ws = XLSX.utils.aoa_to_sheet(data);
+      const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb,ws,'Records');
+      const y=viewDate.getFullYear(), m=viewDate.getMonth()+1;
+      const filename = `records_${y}_${String(m).padStart(2,'0')}.xlsx`;
+      XLSX.writeFile(wb, filename);
+    });
+
+    // init
+    (function(){ renderCalendar(); // set default date input to today
+      const td = new Date(); inputDate.value = `${td.getFullYear()}-${String(td.getMonth()+1).padStart(2,'0')}-${String(td.getDate()).padStart(2,'0')}`;
+    })();
+  </script>
+</body>
+</html>
